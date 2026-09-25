@@ -36,7 +36,7 @@
 
       flakerPackage = pkgs.python3Packages.buildPythonApplication {
         pname = "flaker";
-        version = "0.1.0";
+        version = "0.2.0";
         src = ./.;
         pyproject = true;
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flaker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast, modular Nix development environment and project scaffolding tool"
 readme = "README.md"
 authors = [{ name = "SpanishSyntax", email = "spanishsyntax@pyritelabs.cc" }]
