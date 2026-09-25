@@ -5,6 +5,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from flaker.ui import ui
+
 
 @dataclass
 class Role:
@@ -396,7 +398,7 @@ def load_user_config() -> tuple[dict[str, Role], dict[str, str], list[Path]]:
             for alias_key, target_role in data.get("aliases", {}).items():
                 extra_aliases[alias_key] = target_role
         except Exception as e:
-            print(f"Warning: Failed to parse user config at {roles_file}: {e}", file=sys.stderr)
+            ui.warn(f"Failed to parse user config at {roles_file}: {e}")
 
     return extra_roles, extra_aliases, custom_asset_dirs
 
@@ -416,11 +418,13 @@ def resolve_nixpkgs_url(channel: str | None) -> str:
 
 def print_help():
     """Prints the CLI usage instructions."""
-    print("""\
-Usage: flaker <command> [roles...] [options]
-       flaker [options]
+    print(f"""{ui.badge()} {ui.bold("Polyglot Nix Flake DevShell & Scaffolding Engine")}
 
-Commands:
+{ui.blue("Usage:")}
+  flaker <command> [roles...] [options]
+  flaker [options]
+
+{ui.blue("Commands:")}
   init         Generate flake.nix, .envrc, .gitignore, and scaffold templates.
   env          Only generate flake.nix, .envrc, and .gitignore.
   scaffold     Only copy project templates to the current directory.
@@ -428,7 +432,7 @@ Commands:
   info <role>  Display detailed information for a specific role.
   interactive  Launch interactive role and command selector.
 
-Options:
+{ui.blue("Options:")}
   -f, --force          Overwrite existing files without confirmation prompts.
   -n, --dry-run        Preview generated files in stdout without writing.
   -c, --channel NAME   Nixpkgs channel (default: nixos-26.05, e.g. unstable, 24.11).
@@ -436,12 +440,12 @@ Options:
   -h, --help           Show this help message and exit.
   -v, --version        Show version and exit.
 
-Examples:
-  flaker init py           # Setup Python flake, .envrc, .gitignore, and template
-  flaker env rust next     # Setup flake for Rust & Next.js without scaffolding
-  flaker scaffold folio    # Scaffold Folio files into current folder
+{ui.blue("Examples:")}
+  flaker init py                         # Setup Python flake, .envrc, .gitignore, and template
+  flaker env rust next                   # Setup flake for Rust & Next.js without scaffolding
+  flaker scaffold folio                  # Scaffold Folio files into current folder
   flaker init zig -c unstable --dry-run  # Preview Zig flake on unstable channel
-  flaker list              # View all registered language roles & aliases
+  flaker list                            # View all registered language roles & aliases
 """)
 
 
@@ -451,10 +455,13 @@ def display_roles_list(roles_db: dict[str, Role], aliases: dict[str, str]) -> No
     for alias, target in aliases.items():
         reverse_aliases.setdefault(target, []).append(alias)
 
-    print("\n\033[1;34m❄️  FLAKER ROLES REGISTRY\033[0m")
-    print("=" * 96)
-    print(f"{'ROLE':<12} {'ALIASES':<10} {'CATEGORY':<20} {'DESCRIPTION':<50}")
-    print("-" * 96)
+    ui.header("FLAKER ROLES REGISTRY", width=96)
+    role_hdr = ui.bold(f"{'ROLE':<12}")
+    alias_hdr = ui.bold(f"{'ALIASES':<10}")
+    cat_hdr = ui.bold(f"{'CATEGORY':<20}")
+    desc_hdr = ui.bold("DESCRIPTION")
+    print(f"{role_hdr} {alias_hdr} {cat_hdr} {desc_hdr}")
+    print(ui.dim("-" * 96))
 
     # Group roles by category
     categories: dict[str, list[str]] = {}
@@ -465,34 +472,35 @@ def display_roles_list(roles_db: dict[str, Role], aliases: dict[str, str]) -> No
         for r_key in sorted(categories[cat]):
             role = roles_db[r_key]
             alias_str = ", ".join(reverse_aliases.get(r_key, []))
-            print(f"\033[1m{r_key:<12}\033[0m {alias_str:<10} {role.category:<20} {role.description:<50}")
+            r_col = ui.cyan(f"{r_key:<12}")
+            a_col = ui.dim(f"{alias_str:<10}")
+            print(f"{r_col} {a_col} {role.category:<20} {role.description}")
 
-    print("=" * 96)
-    print("Run '\033[1mflaker info <role>\033[0m' for packages, hooks, and starter files.\n")
+    print(ui.blue("=" * 96))
+    ui.info(f"Run '{ui.bold('flaker info <role>')}' for packages, hooks, and starter files.\n", symbol="💡")
 
 
 def display_role_info(role_name: str, roles_db: dict[str, Role], aliases: dict[str, str], assets_dirs: list[Path]) -> None:
     """Displays detailed configuration and packages for a given role."""
     resolved_name = aliases.get(role_name, role_name)
     if resolved_name not in roles_db:
-        print(f"Error: Unknown role '{role_name}'. Run 'flaker list' to see available roles.", file=sys.stderr)
+        ui.error(f"Unknown role '{role_name}'. Run 'flaker list' to see available roles.")
         sys.exit(1)
 
     role = roles_db[resolved_name]
     rev_aliases = [a for a, t in aliases.items() if t == resolved_name]
 
-    print(f"\n\033[1;34m❄️  Role Information: {resolved_name}\033[0m")
-    print("=" * 72)
-    print(f"  Category    : {role.category}")
-    print(f"  Aliases     : {', '.join(rev_aliases) if rev_aliases else 'none'}")
-    print(f"  Summary     : {role.description}")
-    print("\n  Packages Included in DevShell:")
+    ui.header(f"Role Information: {resolved_name}", width=76)
+    print(f"  {ui.bold('Category')}    : {role.category}")
+    print(f"  {ui.bold('Aliases')}     : {', '.join(rev_aliases) if rev_aliases else ui.dim('none')}")
+    print(f"  {ui.bold('Summary')}     : {role.description}")
+    print(f"\n  {ui.bold('Packages Included in DevShell:')}")
     for pkg in role.pkgs:
-        print(f"    • {pkg}")
+        print(f"    • {ui.cyan(pkg)}")
 
-    print("\n  Shell Activation Hooks:")
+    print(f"\n  {ui.bold('Shell Activation Hooks:')}")
     for hook in role.hooks:
-        print(f"    • {hook}")
+        print(f"    • {ui.dim(hook)}")
 
     # Inspect template files
     template_files: list[str] = []
@@ -503,19 +511,19 @@ def display_role_info(role_name: str, roles_db: dict[str, Role], aliases: dict[s
                 if f.is_file() and "__pycache__" not in f.parts and f.suffix not in (".pyc", ".pyo"):
                     template_files.append(str(f.relative_to(rdir)))
 
-    print("\n  Starter Template Files:")
+    print(f"\n  {ui.bold('Starter Template Files:')}")
     if template_files:
         for tf in template_files:
-            print(f"    📄 {tf}")
+            print(f"    📄 {ui.green(tf)}")
     else:
-        print("    (No template files for this role; env-only)")
+        print(f"    {ui.dim('(No template files for this role; env-only)')}")
 
     if role.ignores:
-        print("\n  Default .gitignore Rules:")
+        print(f"\n  {ui.bold('Default .gitignore Rules:')}")
         for ign in role.ignores:
-            print(f"    🚫 {ign}")
+            print(f"    🚫 {ui.dim(ign)}")
 
-    print("=" * 72 + "\n")
+    print(ui.blue("=" * 76) + "\n")
 
 
 def update_gitignore(
@@ -552,12 +560,13 @@ def update_gitignore(
 
     append_text = "\n\n" + "\n\n".join(new_sections) + "\n"
     if dry_run:
-        print(f"\n=== [DRY RUN] .gitignore additions ==={append_text}")
+        ui.subheader("[DRY RUN] .gitignore additions", width=76)
+        print(append_text.strip())
         return True
 
     final_content = (existing_content.rstrip() + append_text).lstrip()
     gitignore_path.write_text(final_content, encoding="utf-8")
-    print(f"Success: Updated .gitignore at {project_root}")
+    ui.success(f"Updated .gitignore at {project_root}")
     return True
 
 
@@ -575,7 +584,7 @@ def stage_git_files(project_root: Path, files: list[str]):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            print(f"❄️  Auto-staged {', '.join(valid_files)} with git add")
+            ui.action(f"Auto-staged {', '.join(valid_files)} with git add", symbol="📦")
     except Exception:
         pass
 
@@ -598,15 +607,16 @@ def prepare_flake_env(
     if not force and not dry_run and flake_out.exists():
         if sys.stdin.isatty():
             try:
-                ans = input(f"⚠️  flake.nix already exists at {project_root}. Overwrite? [y/N]: ").strip().lower()
+                prompt_msg = f"{ui.badge()} {ui.yellow(f'⚠️  flake.nix already exists at {project_root}. Overwrite? [y/N]: ')}"
+                ans = input(prompt_msg).strip().lower()
                 if ans not in ("y", "yes"):
-                    print("Aborted: existing flake.nix was preserved.")
+                    ui.warn("Aborted: existing flake.nix was preserved.")
                     return False
             except (KeyboardInterrupt, EOFError):
                 print("\nAborted.")
                 return False
         else:
-            print(f"Error: {flake_out} already exists. Pass --force to overwrite.", file=sys.stderr)
+            ui.error(f"{flake_out} already exists. Pass --force to overwrite.")
             sys.exit(1)
 
     selected_pkgs: list[str] = []
@@ -644,9 +654,9 @@ def prepare_flake_env(
     )
 
     if dry_run:
-        print(f"\n=== [DRY RUN] Generated flake.nix (Channel: {nixpkgs_url}) ===")
+        ui.subheader(f"[DRY RUN] Generated flake.nix (Channel: {nixpkgs_url})", width=76)
         print(rendered)
-        print("=== [DRY RUN] Generated .envrc ===")
+        ui.subheader("[DRY RUN] Generated .envrc", width=76)
         print("use flake\n")
         update_gitignore(project_root, resolved_roles, roles_db, dry_run=True)
         return True
@@ -660,7 +670,7 @@ def prepare_flake_env(
 
     # Run direnv allow inside the project root
     subprocess.run(["direnv", "allow"], cwd=project_root, check=False)
-    print(f"Success: Generated flake.nix and .envrc at {project_root}")
+    ui.success(f"Generated flake.nix and .envrc at {project_root}")
 
     if auto_git:
         stage_git_files(project_root, ["flake.nix", ".envrc", ".gitignore"])
@@ -695,7 +705,7 @@ def scaffold_assets(
                     dest_path = target_dir / relative_path
 
                     if dry_run:
-                        print(f"[DRY RUN] Would scaffold {relative_path} into {dest_path}")
+                        ui.info(f"[DRY RUN] Would scaffold {relative_path} into {dest_path}")
                         scaffolded_any = True
                         continue
 
@@ -710,13 +720,12 @@ def scaffold_assets(
                 break
 
     if scaffolded_any and not dry_run:
-        print(f"Success: Scaffolded assets into {target_dir}")
+        ui.success(f"Scaffolded starter assets into {target_dir}")
 
 
 def run_interactive_mode(roles_db: dict[str, Role], aliases: dict[str, str]) -> tuple[str, list[str]]:
     """Interactive role and command selector for TTY sessions."""
-    print("\n\033[1;34m❄️  Flaker Interactive Stack Selector\033[0m")
-    print("=" * 72)
+    ui.header("Flaker Interactive Stack Selector", width=76)
     print("Select stack / roles by number (space or comma-separated, e.g. '1 8'):\n")
 
     sorted_roles = sorted(roles_db.keys())
@@ -724,18 +733,18 @@ def run_interactive_mode(roles_db: dict[str, Role], aliases: dict[str, str]) -> 
         role = roles_db[r]
         rev_a = [a for a, t in aliases.items() if t == r]
         alias_str = f"({rev_a[0]})" if rev_a else ""
-        print(f"  [\033[1m{idx:>2}\033[0m] {r:<10} {alias_str:<8} \033[90m[{role.category}]\033[0m {role.description}")
+        print(f"  [{ui.bold(f'{idx:>2}')}] {ui.cyan(f'{r:<10}')} {ui.dim(f'{alias_str:<8}')} {ui.dim(f'[{role.category}]')} {role.description}")
 
-    print("=" * 72)
+    print(ui.blue("=" * 76))
 
     try:
-        selection = input("\nSelection: ").strip()
+        selection = input(f"\n{ui.bold('Selection: ')}").strip()
     except (KeyboardInterrupt, EOFError):
         print("\nAborted.")
         sys.exit(0)
 
     if not selection:
-        print("No roles selected. Exiting.")
+        ui.warn("No roles selected. Exiting.")
         sys.exit(0)
 
     chosen_roles: list[str] = []
@@ -754,17 +763,17 @@ def run_interactive_mode(roles_db: dict[str, Role], aliases: dict[str, str]) -> 
                 chosen_roles.append(tok_lower)
 
     if not chosen_roles:
-        print("No valid roles recognized. Exiting.")
+        ui.error("No valid roles recognized. Exiting.")
         sys.exit(1)
 
-    print(f"\nChosen roles: \033[1m{', '.join(chosen_roles)}\033[0m")
-    print("Command:")
-    print("  [1] init     (flake.nix + .envrc + .gitignore + project starter templates)")
-    print("  [2] env      (flake.nix + .envrc + .gitignore only)")
-    print("  [3] scaffold (project starter templates only)")
+    print(f"\nChosen roles: {ui.bold_green(', '.join(chosen_roles))}")
+    print(f"{ui.bold('Command:')}")
+    print(f"  [{ui.cyan('1')}] init     (flake.nix + .envrc + .gitignore + project starter templates)")
+    print(f"  [{ui.cyan('2')}] env      (flake.nix + .envrc + .gitignore only)")
+    print(f"  [{ui.cyan('3')}] scaffold (project starter templates only)")
 
     try:
-        cmd_in = input("Choice [1]: ").strip()
+        cmd_in = input(f"\n{ui.bold('Choice [1]: ')}").strip()
     except (KeyboardInterrupt, EOFError):
         print("\nAborted.")
         sys.exit(0)
@@ -781,7 +790,7 @@ def main() -> None:
         sys.exit(0)
 
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v", "version"):
-        print("flaker 0.2.0")
+        print(f"{ui.badge()} {ui.bold('v0.2.0')}")
         sys.exit(0)
 
     # Smart Paths & Asset Discovery
@@ -823,7 +832,7 @@ def main() -> None:
     # Handle 'flaker info <role>'
     if args and args[0] in ("info", "show"):
         if len(args) < 2:
-            print("Error: Missing role name for 'flaker info'. Example: flaker info python", file=sys.stderr)
+            ui.error("Missing role name for 'flaker info'. Example: flaker info python")
             sys.exit(1)
         display_role_info(args[1], roles_db, aliases, all_asset_dirs)
         sys.exit(0)
@@ -849,7 +858,7 @@ def main() -> None:
                 channel = args[i + 1]
                 i += 1
             else:
-                print("Error: --channel requires a channel name or url.", file=sys.stderr)
+                ui.error("--channel requires a channel name or url.")
                 sys.exit(1)
         elif arg.startswith("--channel="):
             channel = arg.split("=", 1)[1]
@@ -881,17 +890,17 @@ def main() -> None:
             if sys.stdin.isatty():
                 _, raw_roles = run_interactive_mode(roles_db, aliases)
             else:
-                print(f"Error: Missing roles for command '{command}'. Example: flaker {command} python", file=sys.stderr)
+                ui.error(f"Missing roles for command '{command}'. Example: flaker {command} python")
                 sys.exit(1)
 
     # Enforce valid commands
     if command not in ("init", "env", "scaffold"):
-        print(f"Error: Unknown command '{command}'.\n", file=sys.stderr)
+        ui.error(f"Unknown command '{command}'.\n")
         print_help()
         sys.exit(1)
 
     if not template_path.exists():
-        print(f"Error: FLAKE_TEMPLATE path invalid or missing: {template_path}", file=sys.stderr)
+        ui.error(f"FLAKE_TEMPLATE path invalid or missing: {template_path}")
         sys.exit(1)
 
     nixpkgs_url = resolve_nixpkgs_url(channel)
