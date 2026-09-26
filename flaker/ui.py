@@ -33,6 +33,9 @@ class UI:
     def cyan(self, text: str) -> str:
         return self.style(text, "0;36")
 
+    def bold_cyan(self, text: str) -> str:
+        return self.style(text, "1;36")
+
     def green(self, text: str) -> str:
         return self.style(text, "0;32")
 
@@ -69,11 +72,11 @@ class UI:
     def action(self, msg: str, symbol: str = "⚡"):
         print(self.status(symbol, msg, "0;36"))
 
-    def header(self, title: str, width: int = 80):
+    def header(self, title: str, width: int = 76):
         border = self.blue("=" * width)
         print(f"\n{border}\n {self.bold(title)}\n{border}")
 
-    def subheader(self, title: str, width: int = 80):
+    def subheader(self, title: str, width: int = 76):
         rule_part = self.dim("-" * max(0, width - len(title) - 5))
         print(f"\n{self.cyan(f'--- {title}')} {rule_part}")
 
