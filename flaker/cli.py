@@ -436,13 +436,17 @@ def print_help():
   -f, --force          Overwrite existing files without confirmation prompts.
   -n, --dry-run        Preview generated files in stdout without writing.
   -c, --channel NAME   Nixpkgs channel (default: nixos-26.05, e.g. unstable, 24.11).
+  --no-direnv          Skip generating .envrc and skip 'direnv allow'.
   --no-git             Do not automatically stage generated files with 'git add'.
+  --color MODE         Color output mode: auto, always, never (default: auto).
+  --no-color           Disable colored output.
   -h, --help           Show this help message and exit.
-  -v, --version        Show version and exit.
+  -V, -v, --version    Show version and exit.
 
 {ui.blue("Examples:")}
   flaker init py                         # Setup Python flake, .envrc, .gitignore, and template
   flaker env rust next                   # Setup flake for Rust & Next.js without scaffolding
+  flaker env py --no-direnv              # Generate flake.nix and .gitignore without .envrc
   flaker scaffold folio                  # Scaffold Folio files into current folder
   flaker init zig -c unstable --dry-run  # Preview Zig flake on unstable channel
   flaker list                            # View all registered language roles & aliases
@@ -599,6 +603,7 @@ def prepare_flake_env(
     force: bool = False,
     dry_run: bool = False,
     auto_git: bool = True,
+    no_direnv: bool = False,
 ) -> bool:
     """Generates the flake.nix and .envrc at the project root."""
     flake_out = project_root / "flake.nix"
@@ -656,24 +661,29 @@ def prepare_flake_env(
     if dry_run:
         ui.subheader(f"[DRY RUN] Generated flake.nix (Channel: {nixpkgs_url})", width=76)
         print(rendered)
-        ui.subheader("[DRY RUN] Generated .envrc", width=76)
-        print("use flake\n")
+        if not no_direnv:
+            ui.subheader("[DRY RUN] Generated .envrc", width=76)
+            print("use flake\n")
         update_gitignore(project_root, resolved_roles, roles_db, dry_run=True)
         return True
 
     flake_out.write_text(rendered, encoding="utf-8")
 
-    if not envrc_out.exists():
-        envrc_out.write_text("use flake\n", encoding="utf-8")
+    if not no_direnv:
+        if not envrc_out.exists():
+            envrc_out.write_text("use flake\n", encoding="utf-8")
+        subprocess.run(["direnv", "allow"], cwd=project_root, check=False)
 
     update_gitignore(project_root, resolved_roles, roles_db, dry_run=False)
 
-    # Run direnv allow inside the project root
-    subprocess.run(["direnv", "allow"], cwd=project_root, check=False)
-    ui.success(f"Generated flake.nix and .envrc at {project_root}")
+    msg = f"Generated flake.nix at {project_root}" if no_direnv else f"Generated flake.nix and .envrc at {project_root}"
+    ui.success(msg)
 
     if auto_git:
-        stage_git_files(project_root, ["flake.nix", ".envrc", ".gitignore"])
+        stage_files = ["flake.nix", ".gitignore"]
+        if not no_direnv:
+            stage_files.append(".envrc")
+        stage_git_files(project_root, stage_files)
 
     return True
 
@@ -783,13 +793,25 @@ def run_interactive_mode(roles_db: dict[str, Role], aliases: dict[str, str]) -> 
     return chosen_cmd, chosen_roles
 
 
+def handle_color_args():
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--no-color":
+            ui.set_color_mode("never")
+        elif arg.startswith("--color="):
+            ui.set_color_mode(arg.split("=", 1)[1])
+        elif arg == "--color" and i + 1 < len(sys.argv[1:]):
+            ui.set_color_mode(sys.argv[1:][i + 1])
+
+
 def main() -> None:
+    handle_color_args()
+
     # Basic flags
-    if len(sys.argv) == 2 and sys.argv[1] in ("--help", "-h", "help"):
+    if any(a in ("--help", "-h", "help") for a in sys.argv[1:]):
         print_help()
         sys.exit(0)
 
-    if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v", "version"):
+    if any(a in ("-V", "--version", "-v", "version") for a in sys.argv[1:]):
         print(f"{ui.badge()} {ui.bold('v0.2.0')}")
         sys.exit(0)
 
@@ -841,6 +863,7 @@ def main() -> None:
     force = False
     dry_run = False
     auto_git = True
+    no_direnv = False
     channel = None
 
     filtered_args: list[str] = []
@@ -853,6 +876,11 @@ def main() -> None:
             dry_run = True
         elif arg == "--no-git":
             auto_git = False
+        elif arg == "--no-direnv":
+            no_direnv = True
+        elif arg in ("--color", "--no-color") or arg.startswith("--color="):
+            if arg == "--color" and i + 1 < len(args):
+                i += 1
         elif arg in ("-c", "--channel"):
             if i + 1 < len(args):
                 channel = args[i + 1]
@@ -864,6 +892,9 @@ def main() -> None:
             channel = arg.split("=", 1)[1]
         elif arg in ("--help", "-h"):
             print_help()
+            sys.exit(0)
+        elif arg in ("-V", "--version", "-v"):
+            print(f"{ui.badge()} {ui.bold('v0.2.0')}")
             sys.exit(0)
         else:
             filtered_args.append(arg)
@@ -917,6 +948,7 @@ def main() -> None:
             force=force,
             dry_run=dry_run,
             auto_git=auto_git,
+            no_direnv=no_direnv,
         )
         if not success:
             sys.exit(0)

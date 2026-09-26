@@ -70,9 +70,12 @@ Options:
   -f, --force          Overwrite existing files without confirmation prompts.
   -n, --dry-run        Preview generated files in stdout without writing.
   -c, --channel NAME   Nixpkgs channel (default: nixos-26.05, e.g. unstable, 24.11).
+  --no-direnv          Skip generating .envrc and skip 'direnv allow'.
   --no-git             Do not automatically stage generated files with 'git add'.
+  --color MODE         Color output mode: auto, always, never (default: auto).
+  --no-color           Disable colored output.
   -h, --help           Show this help message and exit.
-  -v, --version        Show version and exit.
+  -V, -v, --version    Show version and exit.
 ```
 
 ---
