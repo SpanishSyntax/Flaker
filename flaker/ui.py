@@ -1,11 +1,20 @@
-"""Terminal UI, ANSI styling, and interactive menu engine for CLI tools."""
+"""Terminal UI, ANSI styling, and robust interactive menu engine for CLI tools."""
 
 import os
+import re
 import select
+import shutil
 import sys
 import termios
 import tty
 from typing import Any, Sequence
+
+ANSI_REGEX = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def strip_ansi(text: str) -> str:
+    """Strips ANSI escape codes to measure true visual character length."""
+    return ANSI_REGEX.sub("", text)
 
 
 class UI:
@@ -93,54 +102,94 @@ class UI:
         print(f"\n{self.cyan(f'--- {title}')} {rule_part}")
 
     # -------------------------------------------------------------------------
-    # Interactive Terminal Engine (Arrow / Spacebar Menus)
+    # Robust Terminal Engine (Arrow Keys & Non-Wrapping Width Handling)
     # -------------------------------------------------------------------------
     def _read_key(self) -> str:
-        """Reads a single keypress or ANSI escape sequence from stdin."""
+        """
+        Reads a single raw keypress or ANSI escape sequence directly from stdin.
+        Uses os.read() without TextIOWrapper buffering to ensure escape sequences
+        arrive atomically and reliably in modern terminal emulators (Kitty, Alacritty, etc.).
+        """
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
-            ch = sys.stdin.read(1)
-            if ch == "\x1b":
-                # Check if this is an escape sequence or a single ESC press
-                r, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if not r:
-                    return "esc"
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == "A":
-                        return "up"
-                    if ch3 == "B":
-                        return "down"
-                    if ch3 == "C":
-                        return "right"
-                    if ch3 == "D":
-                        return "left"
-                    if ch3 in ("1", "2", "3", "4", "5", "6"):
-                        sys.stdin.read(1)  # consume trailing '~'
-                        return "other"
-                return "esc"
-            if ch in ("\r", "\n"):
-                return "enter"
-            if ch == " ":
-                return "space"
-            if ch == "\x03":  # Ctrl+C
-                return "ctrl_c"
-            if ch == "\x04":  # Ctrl+D
+            raw = os.read(fd, 32)
+            if not raw:
                 return "ctrl_d"
-            if ch in ("k", "K"):
+
+            # Check if this is an escape sequence
+            if raw == b"\x1b":
+                # Check if more bytes are pending in the kernel pty buffer
+                r, _, _ = select.select([fd], [], [], 0.025)
+                if r:
+                    raw += os.read(fd, 32)
+                else:
+                    return "esc"
+
+            # Arrow keys & cursor navigation:
+            # Handles \x1b[A, \x1bOA (application mode), \x1b[1;2A, \x1b[[A, etc.
+            if raw.startswith(b"\x1b") and raw.endswith(b"A"):
                 return "up"
-            if ch in ("j", "J"):
+            if raw.startswith(b"\x1b") and raw.endswith(b"B"):
                 return "down"
-            if ch in ("a", "A"):
+            if raw.startswith(b"\x1b") and raw.endswith(b"C"):
+                return "right"
+            if raw.startswith(b"\x1b") and raw.endswith(b"D"):
+                return "left"
+
+            # Enter, space, vim navigation, controls
+            if raw in (b"\r", b"\n"):
+                return "enter"
+            if raw == b" ":
+                return "space"
+            if raw == b"\x03":  # Ctrl+C
+                return "ctrl_c"
+            if raw == b"\x04":  # Ctrl+D
+                return "ctrl_d"
+            if raw in (b"k", b"K"):
+                return "up"
+            if raw in (b"j", b"J"):
+                return "down"
+            if raw in (b"a", b"A"):
                 return "a"
-            if ch in ("q", "Q"):
+            if raw in (b"q", b"Q"):
                 return "q"
-            return ch
+
+            return raw.decode("utf-8", errors="ignore")
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    @staticmethod
+    def _fit_line(prefix: str, label_styled: str, label_plain: str, desc: str, max_w: int) -> str:
+        """
+        Ensures a menu item line never exceeds max_w visual columns.
+        Prevents terminal wrapping so cursor up/down operations remain 100% in sync.
+        """
+        prefix_len = len(strip_ansi(prefix))
+        avail = max_w - prefix_len
+        if avail <= 5:
+            return prefix + label_plain[:max(0, avail)]
+
+        if not desc:
+            if len(label_plain) <= avail:
+                return f"{prefix}{label_styled}"
+            return f"{prefix}{label_plain[:max(0, avail - 3)]}..."
+
+        # Both label and desc present
+        if len(label_plain) + 2 + len(desc) <= avail:
+            return f"{prefix}{label_styled} \033[90m{desc}\033[0m"
+
+        # Fit label and truncated description
+        if len(label_plain) + 6 <= avail:
+            rem = avail - len(label_plain) - 4
+            trunc_desc = desc[:max(0, rem)] + "..."
+            return f"{prefix}{label_styled} \033[90m{trunc_desc}\033[0m"
+
+        # Narrow terminal: label only
+        if len(label_plain) <= avail:
+            return f"{prefix}{label_styled}"
+        return f"{prefix}{label_plain[:max(0, avail - 3)]}..."
 
     @staticmethod
     def _normalize_options(options: Sequence[Any]) -> list[tuple[str, str, str]]:
@@ -172,7 +221,7 @@ class UI:
     ) -> str:
         """
         Single-select interactive menu with arrow key navigation.
-        Returns the chosen option's key.
+        Width & height aware: truncates wide lines and paginates lists to fit any terminal size.
         """
         items = self._normalize_options(options)
         if not items:
@@ -190,6 +239,7 @@ class UI:
             return items[0][0]
 
         current = max(0, min(default_index, len(items) - 1))
+        scroll_offset = 0
         rendered_lines = 0
 
         # Hide cursor
@@ -198,26 +248,58 @@ class UI:
 
         try:
             while True:
+                term_size = shutil.get_terminal_size(fallback=(80, 24))
+                cols, term_rows = term_size.columns, term_size.lines
+                max_w = max(25, cols - 1)
+
+                # Available vertical rows for items
+                max_visible = max(3, min(len(items), term_rows - 5, 10))
+
+                # Keep active item inside scroll window
+                if current < scroll_offset:
+                    scroll_offset = current
+                elif current >= scroll_offset + max_visible:
+                    scroll_offset = current - max_visible + 1
+                scroll_offset = max(0, min(scroll_offset, max(0, len(items) - max_visible)))
+
                 lines = []
-                lines.append(f"{self.badge()} {self.bold(title)}")
-                lines.append(self.dim("  (Use ↑/↓ or j/k to navigate, Enter to select, q/Ctrl+C to cancel)"))
+                # Header
+                raw_title = f"{self.badge()} {self.bold(title)}"
+                lines.append(raw_title if len(strip_ansi(raw_title)) <= max_w else raw_title[:max_w])
+
+                # Subtitle navigation hint
+                raw_help = self.dim("  (Use ↑/↓ or j/k to navigate, Enter to select, q/Ctrl+C to cancel)")
+                lines.append(raw_help if len(strip_ansi(raw_help)) <= max_w else self.dim("  (↑/↓: navigate, Enter: select)"))
                 lines.append("")
 
-                for idx, (key, label, desc) in enumerate(items):
-                    desc_str = f" {self.dim(desc)}" if desc else ""
-                    if idx == current:
+                # Up indicator if scrolled
+                if scroll_offset > 0:
+                    lines.append(self.dim(f"  ▲ ({scroll_offset} more above...)"))
+
+                # Visible items
+                visible_items = items[scroll_offset : scroll_offset + max_visible]
+                for idx_offset, (key, label, desc) in enumerate(visible_items):
+                    actual_idx = scroll_offset + idx_offset
+                    if actual_idx == current:
                         pointer = self.bold_cyan("❯")
-                        item_text = self.bold_cyan(label)
+                        styled_lbl = self.bold_cyan(label)
                     else:
                         pointer = " "
-                        item_text = label
-                    lines.append(f"  {pointer} {item_text}{desc_str}")
+                        styled_lbl = label
 
-                # Erase previous frame if already rendered
+                    prefix = f"  {pointer} "
+                    lines.append(self._fit_line(prefix, styled_lbl, label, desc, max_w))
+
+                # Down indicator if more below
+                if scroll_offset + max_visible < len(items):
+                    remaining = len(items) - (scroll_offset + max_visible)
+                    lines.append(self.dim(f"  ▼ ({remaining} more below...)"))
+
+                # Clear previous frame rows and redraw in-place
                 if rendered_lines > 0:
-                    sys.stdout.write(f"\033[{rendered_lines}F")
+                    sys.stdout.write(f"\033[{rendered_lines}A\r")
                 for line in lines:
-                    sys.stdout.write(f"\033[2K{line}\n")
+                    sys.stdout.write(f"\033[2K{line}\r\n")
                 sys.stdout.flush()
                 rendered_lines = len(lines)
 
@@ -229,15 +311,20 @@ class UI:
                 elif key == "enter":
                     break
                 elif key in ("ctrl_c", "ctrl_d", "q", "esc"):
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    raise KeyboardInterrupt
+                    if rendered_lines > 0:
+                        sys.stdout.write(f"\033[{rendered_lines}A\r")
+                        for _ in range(rendered_lines):
+                            sys.stdout.write("\033[2K\r\n")
+                        sys.stdout.write(f"\033[{rendered_lines}A\r")
+                        sys.stdout.flush()
+                    print("\nAborted.")
+                    sys.exit(0)
 
-            # Clear interactive block and print clean outcome
-            sys.stdout.write(f"\033[{rendered_lines}F")
+            # Clear interactive frame cleanly and output final choice
+            sys.stdout.write(f"\033[{rendered_lines}A\r")
             for _ in range(rendered_lines):
-                sys.stdout.write("\033[2K\n")
-            sys.stdout.write(f"\033[{rendered_lines}F")
+                sys.stdout.write("\033[2K\r\n")
+            sys.stdout.write(f"\033[{rendered_lines}A\r")
             print(f"{self.badge()} {self.dim(title)} {self.bold_green(items[current][1])}")
             sys.stdout.flush()
             return items[current][0]
@@ -254,7 +341,7 @@ class UI:
     ) -> list[str]:
         """
         Multi-select interactive menu with arrow key navigation and spacebar toggling.
-        Returns list of selected option keys.
+        Width & height aware: truncates wide lines and paginates lists to fit any terminal size.
         """
         items = self._normalize_options(options)
         if not items:
@@ -277,6 +364,7 @@ class UI:
             return chosen if chosen else list(selected_keys)
 
         current = 0
+        scroll_offset = 0
         rendered_lines = 0
 
         # Hide cursor
@@ -285,34 +373,59 @@ class UI:
 
         try:
             while True:
+                term_size = shutil.get_terminal_size(fallback=(80, 24))
+                cols, term_rows = term_size.columns, term_size.lines
+                max_w = max(25, cols - 1)
+
+                # Available vertical rows for items
+                max_visible = max(3, min(len(items), term_rows - 5, 10))
+
+                # Keep active item inside scroll window
+                if current < scroll_offset:
+                    scroll_offset = current
+                elif current >= scroll_offset + max_visible:
+                    scroll_offset = current - max_visible + 1
+                scroll_offset = max(0, min(scroll_offset, max(0, len(items) - max_visible)))
+
                 lines = []
-                lines.append(f"{self.badge()} {self.bold(title)}")
-                lines.append(self.dim("  (↑/↓ to navigate, Space to toggle, 'a' for all, Enter to confirm)"))
+                raw_title = f"{self.badge()} {self.bold(title)}"
+                lines.append(raw_title if len(strip_ansi(raw_title)) <= max_w else raw_title[:max_w])
+
+                raw_help = self.dim("  (↑/↓: navigate, Space: toggle, a: all, Enter: confirm, q/Ctrl+C: cancel)")
+                lines.append(raw_help if len(strip_ansi(raw_help)) <= max_w else self.dim("  (↑/↓: nav, Space: toggle, Enter: ok)"))
                 lines.append("")
 
-                for idx, (key, label, desc) in enumerate(items):
+                # Up indicator if scrolled
+                if scroll_offset > 0:
+                    lines.append(self.dim(f"  ▲ ({scroll_offset} more above...)"))
+
+                # Visible items
+                visible_items = items[scroll_offset : scroll_offset + max_visible]
+                for idx_offset, (key, label, desc) in enumerate(visible_items):
+                    actual_idx = scroll_offset + idx_offset
                     is_checked = key in selected_keys
-                    if is_checked:
-                        check = self.bold_green("[✔]")
-                    else:
-                        check = self.dim("[ ]")
+                    check = self.bold_green("[✔]") if is_checked else self.dim("[ ]")
 
-                    desc_str = f" {self.dim(desc)}" if desc else ""
-
-                    if idx == current:
+                    if actual_idx == current:
                         pointer = self.bold_cyan("❯")
-                        lbl_styled = self.bold_cyan(label) if is_checked else self.bold(label)
+                        styled_lbl = self.bold_cyan(label) if is_checked else self.bold(label)
                     else:
                         pointer = " "
-                        lbl_styled = self.green(label) if is_checked else label
+                        styled_lbl = self.green(label) if is_checked else label
 
-                    lines.append(f"  {pointer} {check} {lbl_styled}{desc_str}")
+                    prefix = f"  {pointer} {check} "
+                    lines.append(self._fit_line(prefix, styled_lbl, label, desc, max_w))
 
-                # Erase previous frame if already rendered
+                # Down indicator if more below
+                if scroll_offset + max_visible < len(items):
+                    remaining = len(items) - (scroll_offset + max_visible)
+                    lines.append(self.dim(f"  ▼ ({remaining} more below...)"))
+
+                # Clear previous frame rows and redraw in-place
                 if rendered_lines > 0:
-                    sys.stdout.write(f"\033[{rendered_lines}F")
+                    sys.stdout.write(f"\033[{rendered_lines}A\r")
                 for line in lines:
-                    sys.stdout.write(f"\033[2K{line}\n")
+                    sys.stdout.write(f"\033[2K{line}\r\n")
                 sys.stdout.flush()
                 rendered_lines = len(lines)
 
@@ -328,7 +441,6 @@ class UI:
                     else:
                         selected_keys.add(cur_key)
                 elif key == "a":
-                    # Toggle all
                     if len(selected_keys) == len(items):
                         selected_keys.clear()
                     else:
@@ -336,15 +448,20 @@ class UI:
                 elif key == "enter":
                     break
                 elif key in ("ctrl_c", "ctrl_d", "q", "esc"):
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    raise KeyboardInterrupt
+                    if rendered_lines > 0:
+                        sys.stdout.write(f"\033[{rendered_lines}A\r")
+                        for _ in range(rendered_lines):
+                            sys.stdout.write("\033[2K\r\n")
+                        sys.stdout.write(f"\033[{rendered_lines}A\r")
+                        sys.stdout.flush()
+                    print("\nAborted.")
+                    sys.exit(0)
 
-            # Clear interactive block and print clean outcome
-            sys.stdout.write(f"\033[{rendered_lines}F")
+            # Clear interactive frame cleanly and output final choice
+            sys.stdout.write(f"\033[{rendered_lines}A\r")
             for _ in range(rendered_lines):
-                sys.stdout.write("\033[2K\n")
-            sys.stdout.write(f"\033[{rendered_lines}F")
+                sys.stdout.write("\033[2K\r\n")
+            sys.stdout.write(f"\033[{rendered_lines}A\r")
             chosen_labels = [lbl for k, lbl, _ in items if k in selected_keys]
             print(f"{self.badge()} {self.dim(title)} {self.bold_green(', '.join(chosen_labels) if chosen_labels else 'none')}")
             sys.stdout.flush()
