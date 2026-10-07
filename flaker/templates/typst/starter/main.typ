@@ -1,4 +1,4 @@
-#import "template.typ": conf
+#import "/template.typ": conf
 #import "@preview/cetz:0.3.1"
 #import "@preview/merman:0.1.0": mermaid
 
@@ -26,7 +26,7 @@
     "Typst Shenanigans",
     "42",
   ),
-  bibliography: bibliography("library.bib", title: auto),
+  bibliography: bibliography("/library.bib", title: auto),
 )
 
 #v(1em)

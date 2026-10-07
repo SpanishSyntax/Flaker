@@ -1,10 +1,15 @@
 import os
+import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from rich import print as rprint
 
-HTML_FILE = "index.html"
+if len(sys.argv) > 1:
+    target = sys.argv[1]
+    HTML_FILE = os.path.join(target, "index.html") if os.path.isdir(target) else target
+else:
+    HTML_FILE = "index.html"
 
 # JavaScript snippet dynamically injected into the HTML
 AUTO_RELOAD_JS = b"""
