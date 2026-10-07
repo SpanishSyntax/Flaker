@@ -161,6 +161,7 @@ def build_builtin_role_registry(folder_name: str) -> dict[str, Role]:
                 "ty",
             ],
             hooks=[
+                'export PYTHONPATH="$PWD''${PYTHONPATH:+:$PYTHONPATH}"',
                 "export UV_PYTHON_DOWNLOADS=never",
                 "[ -f pyproject.toml ] && uv sync",
                 (
@@ -182,6 +183,7 @@ def build_builtin_role_registry(folder_name: str) -> dict[str, Role]:
                 "ty",
             ],
             hooks=[
+                'export PYTHONPATH="$PWD''${PYTHONPATH:+:$PYTHONPATH}"',
                 "export UV_PYTHON_DOWNLOADS=never",
                 "[ -f pyproject.toml ] && uv sync",
                 "[ -d .venv ] && source .venv/bin/activate",
@@ -421,16 +423,17 @@ def print_help():
     print(f"""{ui.badge()} {ui.bold("Polyglot Nix Flake DevShell & Scaffolding Engine")}
 
 {ui.blue("Usage:")}
-  flaker <command> [roles...] [options]
   flaker [options]
+  flaker <command> [roles...] [options]
 
 {ui.blue("Commands:")}
-  init         Generate flake.nix, .envrc, .gitignore, and scaffold templates.
-  env          Only generate flake.nix, .envrc, and .gitignore.
-  scaffold     Only copy project templates to the current directory.
+  init         Full workspace bootstrap (DevShell + project root files + starter).
+  new          Drop starter files into current directory (e.g. main.py, plot.py).
+  shell        Generate DevShell flake.nix, .envrc, and .gitignore at project root.
+  project      Scaffold only project root foundation files (pyproject.toml, template.typ).
   list         List all available roles, categories, and aliases.
-  info <role>  Display detailed information for a specific role.
-  interactive  Launch interactive role and command selector.
+  info <role>  Display detailed information, packages, and starter files for a role.
+  interactive  Launch interactive Bun-style role and command selector.
 
 {ui.blue("Options:")}
   -f, --force          Overwrite existing files without confirmation prompts.
@@ -444,11 +447,13 @@ def print_help():
   -V, -v, --version    Show version and exit.
 
 {ui.blue("Examples:")}
-  flaker init py                         # Setup Python flake, .envrc, .gitignore, and template
-  flaker env rust next                   # Setup flake for Rust & Next.js without scaffolding
-  flaker env py --no-direnv              # Generate flake.nix and .gitignore without .envrc
-  flaker scaffold folio                  # Scaffold Folio files into current folder
-  flaker init zig -c unstable --dry-run  # Preview Zig flake on unstable channel
+  flaker                                 # Interactive Bun-style stack selector
+  flaker init py                         # Setup Python DevShell, root configs, and starter
+  flaker init py cpp rust typ            # Polyglot multi-language workspace bootstrap
+  flaker new mv                          # Drop mathvis plot.py in current experiment folder
+  flaker new typ                         # Drop typst main.typ in current folder
+  flaker shell rust next                 # Setup DevShell without scaffolding files
+  flaker project typst                   # Scaffold template.typ & library.bib to project root
   flaker list                            # View all registered language roles & aliases
 """)
 
@@ -507,20 +512,40 @@ def display_role_info(role_name: str, roles_db: dict[str, Role], aliases: dict[s
         print(f"    • {ui.dim(hook)}")
 
     # Inspect template files
-    template_files: list[str] = []
+    project_files: list[str] = []
+    starter_files: list[str] = []
     for adir in assets_dirs:
         rdir = adir / resolved_name
         if rdir.exists():
-            for f in rdir.glob("**/*"):
-                if f.is_file() and "__pycache__" not in f.parts and f.suffix not in (".pyc", ".pyo"):
-                    template_files.append(str(f.relative_to(rdir)))
+            pdir = rdir / "project"
+            sdir = rdir / "starter"
+            if pdir.exists() or sdir.exists():
+                if pdir.exists():
+                    for f in pdir.glob("**/*"):
+                        if f.is_file() and "__pycache__" not in f.parts and f.suffix not in (".pyc", ".pyo"):
+                            project_files.append(str(f.relative_to(pdir)))
+                if sdir.exists():
+                    for f in sdir.glob("**/*"):
+                        if f.is_file() and "__pycache__" not in f.parts and f.suffix not in (".pyc", ".pyo"):
+                            starter_files.append(str(f.relative_to(sdir)))
+            else:
+                for f in rdir.glob("**/*"):
+                    if f.is_file() and "__pycache__" not in f.parts and f.suffix not in (".pyc", ".pyo"):
+                        starter_files.append(str(f.relative_to(rdir)))
+            break
 
-    print(f"\n  {ui.bold('Starter Template Files:')}")
-    if template_files:
-        for tf in template_files:
-            print(f"    📄 {ui.green(tf)}")
-    else:
-        print(f"    {ui.dim('(No template files for this role; env-only)')}")
+    if project_files:
+        print(f"\n  {ui.bold('Project Root Foundation Files (flaker project):')}")
+        for pf in project_files:
+            print(f"    📦 {ui.cyan(pf)}")
+
+    if starter_files:
+        print(f"\n  {ui.bold('Starter / Leaf Files (flaker new):')}")
+        for sf in starter_files:
+            print(f"    📄 {ui.green(sf)}")
+    elif not project_files:
+        print(f"\n  {ui.bold('Template Files:')}")
+        print(f"    {ui.dim('(No template files for this role; DevShell only)')}")
 
     if role.ignores:
         print(f"\n  {ui.bold('Default .gitignore Rules:')}")
@@ -693,10 +718,19 @@ def scaffold_assets(
     project_name: str,
     resolved_roles: list[str],
     assets_dirs: list[Path],
+    scope: str = "starter",
     dry_run: bool = False,
-):
-    """Copies role templates into the target directory."""
+    auto_git: bool = True,
+    project_root: Path | None = None,
+) -> bool:
+    """
+    Copies role templates into the target directory based on scope:
+      - 'project': Copies files from role/project/ into target_dir (usually project_root)
+      - 'starter': Copies files from role/starter/ into target_dir (usually current_dir)
+      - 'all': Copies both project and starter assets
+    """
     scaffolded_any = False
+    created_files: list[str] = []
 
     for role_key in resolved_roles:
         found_in_dir = False
@@ -706,91 +740,108 @@ def scaffold_assets(
                 continue
 
             found_in_dir = True
-            for template_file in role_assets_dir.glob("**/*"):
-                if template_file.is_file():
-                    if "__pycache__" in template_file.parts or template_file.suffix in (".pyc", ".pyo"):
-                        continue
+            has_project_subdir = (role_assets_dir / "project").is_dir()
+            has_starter_subdir = (role_assets_dir / "starter").is_dir()
 
-                    relative_path = template_file.relative_to(role_assets_dir)
-                    dest_path = target_dir / relative_path
+            subdirs_to_copy: list[Path] = []
+            if has_project_subdir or has_starter_subdir:
+                if scope in ("project", "all") and has_project_subdir:
+                    subdirs_to_copy.append(role_assets_dir / "project")
+                if scope in ("starter", "all") and has_starter_subdir:
+                    subdirs_to_copy.append(role_assets_dir / "starter")
+            else:
+                # Flat legacy directory
+                subdirs_to_copy.append(role_assets_dir)
 
-                    if dry_run:
-                        ui.info(f"[DRY RUN] Would scaffold {relative_path} into {dest_path}")
-                        scaffolded_any = True
-                        continue
+            for src_dir in subdirs_to_copy:
+                for template_file in src_dir.glob("**/*"):
+                    if template_file.is_file():
+                        if "__pycache__" in template_file.parts or template_file.suffix in (".pyc", ".pyo"):
+                            continue
 
-                    if not dest_path.exists():
-                        dest_path.parent.mkdir(parents=True, exist_ok=True)
-                        content = template_file.read_text(encoding="utf-8")
-                        content = content.replace("__PROJECT_NAME__", project_name)
-                        dest_path.write_text(content, encoding="utf-8")
-                        scaffolded_any = True
+                        relative_path = template_file.relative_to(src_dir)
+                        dest_path = target_dir / relative_path
+
+                        if dry_run:
+                            ui.info(f"[DRY RUN] Would scaffold {relative_path} into {dest_path}")
+                            scaffolded_any = True
+                            continue
+
+                        if not dest_path.exists():
+                            dest_path.parent.mkdir(parents=True, exist_ok=True)
+                            content = template_file.read_text(encoding="utf-8")
+                            content = content.replace("__PROJECT_NAME__", project_name)
+                            dest_path.write_text(content, encoding="utf-8")
+                            scaffolded_any = True
+                            created_files.append(str(dest_path.relative_to(target_dir)))
 
             if found_in_dir:
                 break
 
     if scaffolded_any and not dry_run:
-        ui.success(f"Scaffolded starter assets into {target_dir}")
+        scope_desc = "project foundation" if scope == "project" else ("starter" if scope == "starter" else "")
+        ui.success(f"Scaffolded {scope_desc} assets into {target_dir}")
+        if auto_git:
+            stage_git_files(project_root or target_dir, created_files)
+
+    return scaffolded_any
 
 
-def run_interactive_mode(roles_db: dict[str, Role], aliases: dict[str, str]) -> tuple[str, list[str]]:
-    """Interactive role and command selector for TTY sessions."""
-    ui.header("Flaker Interactive Stack Selector", width=76)
-    print("Select stack / roles by number (space or comma-separated, e.g. '1 8'):\n")
+def run_interactive_mode(
+    roles_db: dict[str, Role],
+    aliases: dict[str, str],
+    current_dir: Path,
+    project_root: Path,
+) -> tuple[str, list[str]]:
+    """Interactive role and command selector using arrow/spacebar menus."""
+    is_subfolder = (project_root != current_dir) and (project_root / "flake.nix").exists()
+    has_root_flake = (project_root / "flake.nix").exists()
+
+    if is_subfolder:
+        try:
+            rel = current_dir.relative_to(project_root)
+        except ValueError:
+            rel = current_dir.name
+        ui.info(f"Existing workspace detected at {ui.bold(str(project_root))}")
+        cmd_options = [
+            ("new", f"Create starter file in ./{rel}/", "Drops starter script in current directory"),
+            ("shell", "Update DevShell environment at root", "flake.nix, .envrc, and .gitignore"),
+            ("project", "Scaffold project foundation files", "Scaffold root configs to workspace root"),
+            ("init", "Re-initialize workspace", "Full bootstrap (DevShell + project foundation + starter)"),
+        ]
+    elif has_root_flake:
+        ui.info(f"Active workspace detected at {ui.bold(str(project_root))}")
+        cmd_options = [
+            ("new", "Create a starter file in current directory", "Drop starter script (main.py, plot.py, etc.)"),
+            ("init", "Re-initialize workspace", "DevShell + root configs + starter"),
+            ("shell", "DevShell environment only", "flake.nix, .envrc, and .gitignore at root"),
+            ("project", "Scaffold project foundation files", "Scaffold root configs to project root"),
+        ]
+    else:
+        cmd_options = [
+            ("init", "Initialize full workspace", "DevShell flake.nix + project root configs + starter"),
+            ("shell", "DevShell environment only", "flake.nix, .envrc, and .gitignore at root"),
+            ("new", "Drop starter files into current directory", "Starter script only"),
+            ("project", "Scaffold project foundation files", "Root configs only (pyproject.toml, template.typ)"),
+        ]
+
+    chosen_cmd = ui.select("What would you like to do?", cmd_options)
 
     sorted_roles = sorted(roles_db.keys())
-    for idx, r in enumerate(sorted_roles, 1):
-        role = roles_db[r]
-        rev_a = [a for a, t in aliases.items() if t == r]
-        alias_str = f"({rev_a[0]})" if rev_a else ""
-        print(f"  [{ui.bold(f'{idx:>2}')}] {ui.cyan(f'{r:<10}')} {ui.dim(f'{alias_str:<8}')} {ui.dim(f'[{role.category}]')} {role.description}")
+    role_options = [
+        (r, f"{r:<10} [{roles_db[r].category}]", roles_db[r].description)
+        for r in sorted_roles
+    ]
 
-    print(ui.blue("=" * 76))
-
-    try:
-        selection = input(f"\n{ui.bold('Selection: ')}").strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\nAborted.")
-        sys.exit(0)
-
-    if not selection:
-        ui.warn("No roles selected. Exiting.")
-        sys.exit(0)
-
-    chosen_roles: list[str] = []
-    tokens = selection.replace(",", " ").split()
-    for tok in tokens:
-        if tok.isdigit():
-            i = int(tok)
-            if 1 <= i <= len(sorted_roles):
-                chosen_roles.append(sorted_roles[i - 1])
-        else:
-            tok_lower = tok.lower()
-            resolved = aliases.get(tok_lower, tok_lower)
-            if resolved in roles_db:
-                chosen_roles.append(resolved)
-            else:
-                chosen_roles.append(tok_lower)
-
-    if not chosen_roles:
-        ui.error("No valid roles recognized. Exiting.")
-        sys.exit(1)
-
-    print(f"\nChosen roles: {ui.bold_green(', '.join(chosen_roles))}")
-    print(f"{ui.bold('Command:')}")
-    print(f"  [{ui.cyan('1')}] init     (flake.nix + .envrc + .gitignore + project starter templates)")
-    print(f"  [{ui.cyan('2')}] env      (flake.nix + .envrc + .gitignore only)")
-    print(f"  [{ui.cyan('3')}] scaffold (project starter templates only)")
-
-    try:
-        cmd_in = input(f"\n{ui.bold('Choice [1]: ')}").strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\nAborted.")
-        sys.exit(0)
-
-    cmd_map = {"1": "init", "2": "env", "3": "scaffold", "init": "init", "env": "env", "scaffold": "scaffold"}
-    chosen_cmd = cmd_map.get(cmd_in, "init")
-    return chosen_cmd, chosen_roles
+    if chosen_cmd == "new":
+        chosen_role = ui.select("Select role for starter file:", role_options)
+        return chosen_cmd, [chosen_role]
+    else:
+        chosen_roles = ui.multiselect("Select roles for the stack:", role_options)
+        if not chosen_roles:
+            ui.warn("No roles selected. Exiting.")
+            sys.exit(0)
+        return chosen_cmd, chosen_roles
 
 
 def handle_color_args():
@@ -812,7 +863,7 @@ def main() -> None:
         sys.exit(0)
 
     if any(a in ("-V", "--version", "-v", "version") for a in sys.argv[1:]):
-        print(f"{ui.badge()} {ui.bold('v0.2.0')}")
+        print(f"{ui.badge()} {ui.bold('v0.3.0')}")
         sys.exit(0)
 
     # Smart Paths & Asset Discovery
@@ -894,38 +945,61 @@ def main() -> None:
             print_help()
             sys.exit(0)
         elif arg in ("-V", "--version", "-v"):
-            print(f"{ui.badge()} {ui.bold('v0.2.0')}")
+            print(f"{ui.badge()} {ui.bold('v0.3.0')}")
             sys.exit(0)
         else:
             filtered_args.append(arg)
         i += 1
 
-    # Interactive trigger if no arguments provided in a TTY
+    COMMAND_ALIASES = {
+        "starter": "new",
+        "draft": "new",
+        "scaffold": "new",
+        "shell": "shell",
+        "env": "shell",
+        "flake": "shell",
+        "base": "project",
+        "root": "project",
+    }
+
     command = ""
     raw_roles: list[str] = []
 
+    # Interactive trigger if no arguments provided in a TTY
     if not filtered_args:
         if sys.stdin.isatty():
-            command, raw_roles = run_interactive_mode(roles_db, aliases)
+            command, raw_roles = run_interactive_mode(roles_db, aliases, current_dir, project_root)
         else:
             print_help()
             sys.exit(1)
     elif filtered_args[0] == "interactive":
-        command, raw_roles = run_interactive_mode(roles_db, aliases)
+        command, raw_roles = run_interactive_mode(roles_db, aliases, current_dir, project_root)
     else:
-        command = filtered_args[0]
+        command = COMMAND_ALIASES.get(filtered_args[0], filtered_args[0])
         raw_roles = filtered_args[1:]
 
-        # If subcommand given without roles in a TTY (e.g. 'flaker init')
-        if command in ("init", "env", "scaffold") and not raw_roles:
+        # If subcommand given without roles in a TTY (e.g. 'flaker new' or 'flaker init')
+        if command in ("init", "new", "shell", "project") and not raw_roles:
             if sys.stdin.isatty():
-                _, raw_roles = run_interactive_mode(roles_db, aliases)
+                sorted_roles = sorted(roles_db.keys())
+                role_options = [
+                    (r, f"{r:<10} [{roles_db[r].category}]", roles_db[r].description)
+                    for r in sorted_roles
+                ]
+                if command == "new":
+                    chosen_role = ui.select("Select role for starter file:", role_options)
+                    raw_roles = [chosen_role]
+                else:
+                    raw_roles = ui.multiselect(f"Select roles for flaker {command}:", role_options)
+                    if not raw_roles:
+                        ui.warn("No roles selected. Exiting.")
+                        sys.exit(0)
             else:
                 ui.error(f"Missing roles for command '{command}'. Example: flaker {command} python")
                 sys.exit(1)
 
     # Enforce valid commands
-    if command not in ("init", "env", "scaffold"):
+    if command not in ("init", "new", "shell", "project"):
         ui.error(f"Unknown command '{command}'.\n")
         print_help()
         sys.exit(1)
@@ -937,7 +1011,8 @@ def main() -> None:
     nixpkgs_url = resolve_nixpkgs_url(channel)
     resolved_roles = [aliases.get(r.lower(), r.lower()) for r in raw_roles]
 
-    if command in ("init", "env"):
+    # 1. DevShell generation (init and shell)
+    if command in ("init", "shell"):
         success = prepare_flake_env(
             project_root=project_root,
             resolved_roles=resolved_roles,
@@ -953,14 +1028,67 @@ def main() -> None:
         if not success:
             sys.exit(0)
 
-    if command in ("init", "scaffold"):
+    # 2. Project foundation scaffolding
+    if command == "init":
+        # Scaffold project root assets
+        scaffold_assets(
+            target_dir=project_root,
+            project_name=project_name,
+            resolved_roles=resolved_roles,
+            assets_dirs=all_asset_dirs,
+            scope="project",
+            dry_run=dry_run,
+            auto_git=auto_git,
+            project_root=project_root,
+        )
+        # Scaffold starter files in current directory
         scaffold_assets(
             target_dir=current_dir,
             project_name=project_name,
             resolved_roles=resolved_roles,
             assets_dirs=all_asset_dirs,
+            scope="starter",
             dry_run=dry_run,
+            auto_git=auto_git,
+            project_root=project_root,
         )
+
+    elif command == "project":
+        scaffold_assets(
+            target_dir=project_root,
+            project_name=project_name,
+            resolved_roles=resolved_roles,
+            assets_dirs=all_asset_dirs,
+            scope="project",
+            dry_run=dry_run,
+            auto_git=auto_git,
+            project_root=project_root,
+        )
+
+    elif command == "new":
+        # Scaffold starter in current directory
+        scaffold_assets(
+            target_dir=current_dir,
+            project_name=project_name,
+            resolved_roles=resolved_roles,
+            assets_dirs=all_asset_dirs,
+            scope="starter",
+            dry_run=dry_run,
+            auto_git=auto_git,
+            project_root=project_root,
+        )
+        # Ensure project foundation exists at project_root if running in a subdirectory
+        if project_root != current_dir:
+            scaffold_assets(
+                target_dir=project_root,
+                project_name=project_name,
+                resolved_roles=resolved_roles,
+                assets_dirs=all_asset_dirs,
+                scope="project",
+                dry_run=dry_run,
+                auto_git=auto_git,
+                project_root=project_root,
+            )
 
 
 if __name__ == "__main__":
