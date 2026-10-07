@@ -37,6 +37,15 @@ nix run github:SpanishSyntax/Flaker -- init python
 # Initialize a Zig project with zls and build.zig
 nix run github:SpanishSyntax/Flaker -- init zig
 
+# Drop a starter experiment file into current folder without touching root configs
+flaker new mv
+
+# Generate only DevShell without starter files
+flaker shell rust next
+
+# Scaffold project foundation files (pyproject.toml, template.typ) to project root
+flaker project typst
+
 # Combine roles: Rust backend + Next.js frontend + DevOps containers
 nix run github:SpanishSyntax/Flaker -- init rust next ops
 
@@ -55,16 +64,17 @@ nix run github:SpanishSyntax/Flaker -- list
 ## 💻 CLI Commands & Options
 
 ```text
-Usage: flaker <command> [roles...] [options]
-       flaker [options]
+Usage: flaker [options]
+       flaker <command> [roles...] [options]
 
 Commands:
-  init         Generate flake.nix, .envrc, .gitignore, and scaffold templates.
-  env          Only generate flake.nix, .envrc, and .gitignore.
-  scaffold     Only copy project templates to the current directory.
+  init         Full workspace bootstrap (DevShell + project root files + starter).
+  new          Drop starter files into current directory (e.g. main.py, plot.py).
+  shell        Generate DevShell flake.nix, .envrc, and .gitignore at project root.
+  project      Scaffold only project root foundation files (pyproject.toml, template.typ).
   list         List all available roles, categories, and aliases.
-  info <role>  Display detailed information for a specific role.
-  interactive  Launch interactive role and command selector.
+  info <role>  Display detailed information, packages, and starter files for a role.
+  interactive  Launch interactive Bun-style role and command selector.
 
 Options:
   -f, --force          Overwrite existing files without confirmation prompts.
